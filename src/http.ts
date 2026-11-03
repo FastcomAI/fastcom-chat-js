@@ -31,11 +31,15 @@ export function resolveFetch(custom?: FetchLike): FetchLike {
   return fetch.bind(globalThis);
 }
 
+/** `Retry-After` in seconds, or null when absent or not a number. */
+export function parseRetryAfter(header: string | null | undefined): number | null {
+  if (header === null || header === undefined || header.trim() === '') return null;
+  const seconds = Number(header);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+}
+
 export async function toError(res: Response): Promise<ChatApiError> {
-  const retryHeader = res.headers.get('retry-after');
-  const retryAfter = retryHeader !== null && retryHeader !== '' && !Number.isNaN(Number(retryHeader))
-    ? Number(retryHeader)
-    : null;
+  const retryAfter = parseRetryAfter(res.headers.get('retry-after'));
   let message = `HTTP ${res.status}`;
   let limit: string | null = null;
   // The stream route answers errors in plain text, the rest in `{ error }`.

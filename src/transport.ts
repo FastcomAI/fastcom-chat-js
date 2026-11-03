@@ -1,4 +1,4 @@
-import type { FetchLike } from './http.js';
+import { parseRetryAfter, type FetchLike } from './http.js';
 
 export interface StreamRequest {
   url: string;
@@ -8,13 +8,14 @@ export interface StreamRequest {
 
 /**
  * Opens a streaming GET. Calls `onText` with each decoded chunk and resolves
- * once the body ends. A non-2xx response resolves right away with its status
- * and body, without calling `onText`. Rejects on network errors and abort.
+ * once the body ends. A non-2xx response resolves right away with its status,
+ * body and `Retry-After` (seconds), without calling `onText`. Rejects on
+ * network errors and abort.
  */
 export type StreamTransport = (
   req: StreamRequest,
   onText: (chunk: string) => void,
-) => Promise<{ status: number; body?: string }>;
+) => Promise<{ status: number; body?: string; retryAfter?: number | null }>;
 
 export function fetchTransport(fetchFn: FetchLike): StreamTransport {
   return async (req, onText) => {
@@ -25,7 +26,11 @@ export function fetchTransport(fetchFn: FetchLike): StreamTransport {
       cache: 'no-store',
     });
     if (!res.ok || !res.body) {
-      return { status: res.status, body: await res.text().catch(() => '') };
+      return {
+        status: res.status,
+        body: await res.text().catch(() => ''),
+        retryAfter: parseRetryAfter(res.headers.get('retry-after')),
+      };
     }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -66,7 +71,11 @@ export const xhrTransport: StreamTransport = (req, onText) =>
         flush();
         resolve({ status: xhr.status });
       } else {
-        resolve({ status: xhr.status, body: xhr.responseText });
+        resolve({
+          status: xhr.status,
+          body: xhr.responseText,
+          retryAfter: parseRetryAfter(xhr.getResponseHeader('Retry-After')),
+        });
       }
     };
     const fail = (err: Error) => {

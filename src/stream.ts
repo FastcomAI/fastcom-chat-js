@@ -34,7 +34,11 @@ interface StreamDeps {
   transport: StreamTransport;
 }
 
-/** A self-healing subscription to `/stream`. Starts connecting immediately. */
+/**
+ * A self-healing subscription to `/stream`. Starts connecting immediately.
+ * Your handlers are never called after `close()`, and a handler that throws
+ * is reported to `onError` without stopping the stream.
+ */
 export class ChatStream {
   private closed = false;
   private abort: AbortController | null = null;
@@ -50,7 +54,7 @@ export class ChatStream {
   ) {
     this.idleTimeoutMs = options.idleTimeoutMs ?? 45_000;
     this.maxBackoffMs = options.maxBackoffMs ?? 30_000;
-    void this.run();
+    this.run().catch((err) => this.reportError(err));
   }
 
   get state(): StreamState {
@@ -62,22 +66,41 @@ export class ChatStream {
     this.closed = true;
     this.abort?.abort();
     this.wake?.();
-    this.setState('closed');
+    this.stateValue = 'closed';
+    this.callHandler(() => this.handlers.onStateChange?.('closed'));
   }
 
   private setState(state: StreamState): void {
-    if (this.stateValue === state) return;
+    if (this.closed || this.stateValue === state) return;
     this.stateValue = state;
-    this.handlers.onStateChange?.(state);
+    this.callHandler(() => this.handlers.onStateChange?.(state));
+  }
+
+  private callHandler(fn: () => void): void {
+    try {
+      fn();
+    } catch (err) {
+      this.reportError(err);
+    }
+  }
+
+  private reportError(err: unknown): void {
+    if (this.closed) return;
+    try {
+      this.handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
+    } catch {
+      // A throwing onError must not kill the stream either.
+    }
   }
 
   private async run(): Promise<void> {
     let attempt = 0;
     let forceRefresh = false;
-    this.handlers.onStateChange?.('connecting');
+    this.callHandler(() => this.handlers.onStateChange?.('connecting'));
 
     while (!this.closed) {
       if (attempt > 0) this.setState('reconnecting');
+      let minDelayMs = 0;
       try {
         const token = await this.deps.getToken(forceRefresh);
         forceRefresh = false;
@@ -86,32 +109,34 @@ export class ChatStream {
           attempt = 0;
         });
         if (this.closed) return;
-        if (result.status === 401) {
-          forceRefresh = true;
-          throw new ChatApiError(401, 'Session token rejected');
-        }
         if (result.status === 404) {
           // The app was deactivated or deleted; retrying cannot help.
-          this.handlers.onError?.(new ChatApiError(404, result.body || 'App not found'));
+          this.reportError(new ChatApiError(404, result.body || 'App not found'));
           this.close();
           return;
         }
+        if (result.status === 401) forceRefresh = true;
         if (result.status < 200 || result.status >= 300) {
-          throw new ChatApiError(result.status, result.body || `HTTP ${result.status}`);
+          throw new ChatApiError(result.status, result.body || `HTTP ${result.status}`, result.retryAfter ?? null);
         }
         // A clean end: the server closes streams on deploy. Reconnect promptly.
       } catch (err) {
         if (this.closed) return;
-        this.handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
+        // A rate limit (on the stream or on minting its token) says how long to wait.
+        if (err instanceof ChatApiError && err.retryAfter) minDelayMs = err.retryAfter * 1000;
+        this.reportError(err);
       }
       if (this.closed) return;
       this.setState('reconnecting');
-      await this.sleep(this.backoff(attempt));
+      await this.sleep(Math.max(this.backoff(attempt), minDelayMs));
       attempt += 1;
     }
   }
 
-  private async openOnce(token: string, onConnected: () => void): Promise<{ status: number; body?: string }> {
+  private async openOnce(
+    token: string,
+    onConnected: () => void,
+  ): Promise<{ status: number; body?: string; retryAfter?: number | null }> {
     const abort = new AbortController();
     this.abort = abort;
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -125,6 +150,7 @@ export class ChatStream {
     };
 
     const parser = new SseParser((data) => {
+      if (this.closed) return;
       let event: StreamEvent;
       try {
         event = JSON.parse(data) as StreamEvent;
@@ -161,22 +187,20 @@ export class ChatStream {
   }
 
   private dispatch(event: StreamEvent): void {
-    // A throwing handler must not kill the stream.
-    try {
-      this.handlers.onEvent?.(event);
-      switch (event.type) {
-        case 'connected':
-          this.handlers.onConnected?.(event);
-          break;
-        case 'message':
-          this.handlers.onMessage?.(event);
-          break;
-        case 'rating':
-          this.handlers.onRating?.(event);
-          break;
-      }
-    } catch (err) {
-      this.handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
+    if (this.closed) return;
+    this.callHandler(() => this.handlers.onEvent?.(event));
+    // onEvent may have called close().
+    if (this.closed) return;
+    switch (event.type) {
+      case 'connected':
+        this.callHandler(() => this.handlers.onConnected?.(event));
+        break;
+      case 'message':
+        this.callHandler(() => this.handlers.onMessage?.(event));
+        break;
+      case 'rating':
+        this.callHandler(() => this.handlers.onRating?.(event));
+        break;
     }
   }
 

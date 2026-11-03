@@ -60,6 +60,7 @@ export class ChatClient {
       this.tokens = new TokenCache(options.tokenProvider);
     } else if (options.publishableKey) {
       const { publishableKey, endUserId, endUserName } = options;
+      assertPublishableKey(publishableKey);
       if (!endUserId) throw new Error('endUserId is required with publishableKey');
       this.tokens = new TokenCache(() => this.mintWithPublishableKey(publishableKey, endUserId, endUserName));
     } else {
@@ -157,6 +158,21 @@ export class ChatClient {
     if (!res.ok) throw await toError(res);
     return (await res.json()) as SessionToken;
   }
+}
+
+/**
+ * The server would happily mint a full-trust token from a secret key, so this
+ * mistake would work and ship the secret key inside the app. Refuse it here.
+ * The message never echoes the key.
+ */
+function assertPublishableKey(key: string): void {
+  if (key.startsWith('pk_')) return;
+  if (key.startsWith('sk_')) {
+    throw new Error(
+      'publishableKey is a secret key (sk_...). Never put a secret key in an app: mint tokens on your backend and pass tokenProvider instead.',
+    );
+  }
+  throw new Error('publishableKey must start with pk_');
 }
 
 export { ChatApiError };

@@ -1,5 +1,5 @@
 /** Every message type a stream event or thread history can carry. */
-export type MessageType = 'TEXT' | 'IMAGE' | 'FILE' | 'AUDIO' | 'VIDEO' | 'LINK';
+export type MessageType = 'TEXT' | 'IMAGE' | 'FILE' | 'AUDIO' | 'VIDEO' | 'LINK' | 'EMOJI' | 'STICKER';
 
 /** The types an end user or agent may send. `LINK` is receive-only. */
 export type SendableMessageType = 'TEXT' | 'IMAGE' | 'AUDIO' | 'VIDEO' | 'FILE';

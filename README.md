@@ -7,6 +7,8 @@ It has no runtime dependencies and works in browsers, React Native and Node 18+.
 npm install @fastcom/chat
 ```
 
+The package is ES modules; CommonJS `require()` works on Node 20.19+ and 22.12+.
+
 ## In the app: `ChatClient`
 
 ```ts
@@ -76,7 +78,9 @@ const page = await server.getMessages({ endUserId: 'user-42', limit: 50 });
 await server.setBotEnabled('user-42', false); // a human takes over
 ```
 
-`ChatServer` throws if it is constructed in a browser, because it holds the secret key.
+`ChatServer` holds the secret key, so it only runs on a server runtime (Node, Deno, Bun, Vercel/Next.js Edge, Cloudflare Workers).
+It throws in a browser or a React Native app.
+`ChatClient` likewise refuses a secret key passed as `publishableKey`.
 
 ## Errors
 

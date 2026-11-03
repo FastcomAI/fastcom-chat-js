@@ -2,7 +2,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ChatApiError, ChatClient, ChatServer, type StreamEvent, type StreamTransport } from '../src/index.js';
+import { ChatApiError, ChatClient, ChatServer, type ChatStream, type StreamEvent, type StreamTransport } from '../src/index.js';
 import { SseParser } from '../src/sse.js';
 import { TokenCache } from '../src/token.js';
 
@@ -141,7 +141,7 @@ describe('ChatClient', () => {
 
   it('requires a token source', () => {
     expect(() => new ChatClient({ baseUrl: BASE, fetch: vi.fn() as unknown as typeof fetch })).toThrow();
-    expect(() => new ChatClient({ baseUrl: BASE, publishableKey: 'pk', fetch: vi.fn() as unknown as typeof fetch })).toThrow(/endUserId/);
+    expect(() => new ChatClient({ baseUrl: BASE, publishableKey: 'pk_live_x', fetch: vi.fn() as unknown as typeof fetch })).toThrow(/endUserId/);
   });
 });
 
@@ -265,5 +265,139 @@ describe('ChatServer', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe('review fixes', () => {
+  it('drops a refresh that was in flight when clearSession() ran, and fetches for the new user', async () => {
+    let user = 'user-A';
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let calls = 0;
+    const cache = new TokenCache(async () => {
+      calls += 1;
+      const forUser = user;
+      if (calls === 1) await gate; // the first refresh is slow
+      return { token: forUser, expiresIn: 1800 };
+    });
+    const pending = cache.get();
+    cache.clear(); // user A signs out mid-refresh
+    user = 'user-B';
+    release();
+    expect(await pending).toBe('user-B');
+    expect(await cache.get()).toBe('user-B');
+    expect(calls).toBe(2);
+  });
+
+  it('refuses a secret key passed as publishableKey, without echoing it', () => {
+    let message = '';
+    try {
+      new ChatClient({ baseUrl: BASE, publishableKey: 'sk_live_supersecret', endUserId: 'u', fetch: vi.fn() as unknown as typeof fetch });
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toMatch(/secret key/);
+    expect(message).not.toContain('supersecret');
+    expect(() => new ChatClient({ baseUrl: BASE, publishableKey: 'nope', endUserId: 'u', fetch: vi.fn() as unknown as typeof fetch })).toThrow(/pk_/);
+  });
+
+  it('never prints the secret key or the session token', async () => {
+    const { inspect } = await import('node:util');
+    const server = new ChatServer({ baseUrl: BASE, secretKey: 'sk_live_supersecret', fetch: vi.fn() as unknown as typeof fetch });
+    expect(inspect(server, { depth: 10, showHidden: true })).not.toContain('supersecret');
+    expect(JSON.stringify(server)).not.toContain('supersecret');
+
+    // A plain function, not vi.fn(): a mock records its calls, Authorization header included.
+    const plainFetch = async () => json({ appId: 'a', name: 'n', botConnected: true, botActive: true });
+    const client = new ChatClient({ baseUrl: BASE, tokenProvider: async () => 'jwt-session-token', fetch: plainFetch as unknown as typeof fetch });
+    await client.getConfig();
+    expect(inspect(client, { depth: 10, showHidden: true })).not.toContain('jwt-session-token');
+    expect(JSON.stringify(client)).not.toContain('jwt-session-token');
+  });
+
+  it('refuses ChatServer in React Native and in a browser', () => {
+    vi.stubGlobal('navigator', { product: 'ReactNative' });
+    try {
+      expect(() => new ChatServer({ baseUrl: BASE, secretKey: 'sk' })).toThrow(/server/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    vi.stubGlobal('document', {});
+    try {
+      expect(() => new ChatServer({ baseUrl: BASE, secretKey: 'sk' })).toThrow(/server/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(() => new ChatServer({ baseUrl: BASE, secretKey: 'sk' })).not.toThrow(); // plain Node
+  });
+
+  it('keeps reconnecting when handlers throw, with no unhandled rejection', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => unhandled.push(e);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      let opened = 0;
+      const transport: StreamTransport = async () => {
+        opened += 1;
+        return { status: 500, body: 'boom' };
+      };
+      const client = new ChatClient({ baseUrl: BASE, tokenProvider: async () => 't', streamTransport: transport, fetch: vi.fn() as unknown as typeof fetch });
+      const stream = client.connect(
+        {
+          onError: () => { throw new Error('bad onError'); },
+          onStateChange: () => { throw new Error('bad onStateChange'); },
+        },
+        { maxBackoffMs: 5 },
+      );
+      await waitFor(() => opened >= 3);
+      stream.close();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(unhandled).toEqual([]);
+      expect(stream.state).toBe('closed');
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('calls no handler after close(), even for the rest of the same chunk', async () => {
+    const transport: StreamTransport = async (req, onText) => {
+      onText(
+        'data: {"type":"connected","appId":"a","endUserId":"u"}\n\n' +
+          'data: {"type":"message","messageId":"m1","content":"first","messageType":"TEXT","isFromPage":true,"platformMessageId":"p","timestamp":"t"}\n\n' +
+          'data: {"type":"message","messageId":"m2","content":"second","messageType":"TEXT","isFromPage":true,"platformMessageId":"p","timestamp":"t"}\n\n',
+      );
+      await new Promise((_, reject) => req.signal.addEventListener('abort', () => reject(new Error('aborted'))));
+      return { status: 200 };
+    };
+    const client = new ChatClient({ baseUrl: BASE, tokenProvider: async () => 't', streamTransport: transport, fetch: vi.fn() as unknown as typeof fetch });
+    const got: string[] = [];
+    const states: string[] = [];
+    const stream: ChatStream = client.connect({
+      onMessage: (m) => {
+        got.push(m.content);
+        stream.close();
+      },
+      onStateChange: (s) => states.push(s),
+    });
+    await waitFor(() => got.length > 0);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(got).toEqual(['first']);
+    expect(states.at(-1)).toBe('closed');
+    expect(stream.state).toBe('closed');
+  });
+
+  it('waits at least Retry-After before reconnecting', async () => {
+    const at: number[] = [];
+    const transport: StreamTransport = async () => {
+      at.push(Date.now());
+      return { status: 429, body: 'Rate limit exceeded', retryAfter: 0.3 };
+    };
+    const client = new ChatClient({ baseUrl: BASE, tokenProvider: async () => 't', streamTransport: transport, fetch: vi.fn() as unknown as typeof fetch });
+    const errors: unknown[] = [];
+    const stream = client.connect({ onError: (e) => errors.push(e) }, { maxBackoffMs: 5 });
+    await waitFor(() => at.length >= 2, 3000);
+    stream.close();
+    expect(at[1]! - at[0]!).toBeGreaterThanOrEqual(290);
+    expect(errors[0]).toMatchObject({ status: 429, retryAfter: 0.3 });
   });
 });
