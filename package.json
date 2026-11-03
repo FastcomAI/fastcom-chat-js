@@ -1,0 +1,51 @@
+{
+  "name": "@fastcom/chat",
+  "version": "0.1.0",
+  "description": "JavaScript/TypeScript SDK for the Fastcom Mobile Chat API",
+  "license": "MIT",
+  "author": "FastcomAI",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FastcomAI/fastcom-chat-js.git"
+  },
+  "homepage": "https://github.com/FastcomAI/fastcom-chat-js#readme",
+  "bugs": "https://github.com/FastcomAI/fastcom-chat-js/issues",
+  "keywords": [
+    "fastcom",
+    "chat",
+    "chatbot",
+    "customer-support",
+    "sse",
+    "react-native"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.0"
+  }
+}
